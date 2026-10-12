@@ -91,7 +91,8 @@ td input { width: 100%; }
 tr.on td { background: color-mix(in srgb, var(--accent) 12%, transparent); }
 .card { border: 1px solid var(--line); border-radius: 8px; padding: 8px; margin: 8px 0; }
 .card.on { border-color: var(--accent); }
-.card b { cursor: pointer; }
+.card b, .lnk { cursor: pointer; }
+.lnk:hover { color: var(--accent); }
 .card .row { margin: 4px 0; }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 10px; }
 .grid2 label { display: flex; flex-direction: column; font-size: 12px; color: var(--muted); }
@@ -101,7 +102,11 @@ tr.on td { background: color-mix(in srgb, var(--accent) 12%, transparent); }
 .gridline { fill: none; stroke: var(--grid); stroke-width: 1; vector-effect: non-scaling-stroke; }
 .walls { fill: none; stroke: var(--wall); stroke-miterlimit: 10; }
 .floor { fill: var(--floor); stroke: none; }
-.edge { stroke: var(--wall); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.edge { fill: none; stroke: var(--wall); stroke-width: 1.5; vector-effect: non-scaling-stroke; pointer-events: none; }
+.wsel { stroke: var(--accent); stroke-width: 5; vector-effect: non-scaling-stroke; pointer-events: none; }
+.feat { fill: transparent; stroke: none; cursor: pointer; }
+.feat.on { fill: color-mix(in srgb, var(--accent) 30%, transparent); stroke: var(--accent); stroke-width: 2.5; vector-effect: non-scaling-stroke; }
+.feat.bad { fill: color-mix(in srgb, var(--danger) 30%, transparent); stroke: var(--danger); stroke-dasharray: 4 3; vector-effect: non-scaling-stroke; }
 .hit { stroke: transparent; cursor: copy; }
 .gap { fill: var(--bg); }
 .gap.bad { fill: color-mix(in srgb, var(--danger) 35%, var(--bg)); }
@@ -110,9 +115,7 @@ tr.on td { background: color-mix(in srgb, var(--accent) 12%, transparent); }
 .leaf, .swing, .closed { fill: none; stroke: var(--text); stroke-width: 1.2; vector-effect: non-scaling-stroke; }
 .swing { stroke-dasharray: 3 3; opacity: .7; }
 .closed { opacity: .5; }
-.wl { fill: var(--muted); text-anchor: middle; dominant-baseline: middle; pointer-events: none; user-select: none; }
-.vtx { fill: var(--panel); stroke: var(--accent); stroke-width: 2; vector-effect: non-scaling-stroke; cursor: move; }
-.vtx.on { fill: var(--accent); }
+.wl { paint-order: stroke; stroke: var(--bg); stroke-width: 3px; stroke-linejoin: round; fill: var(--muted); text-anchor: middle; dominant-baseline: middle; pointer-events: none; user-select: none; }
 .fr { stroke: rgba(0,0,0,.55); stroke-width: 1.2; vector-effect: non-scaling-stroke; fill-opacity: .8; cursor: move; }
 .fr.sel { stroke: var(--accent); stroke-width: 3; }
 .fr.bad { stroke: var(--danger); stroke-dasharray: 5 3; stroke-width: 2; }

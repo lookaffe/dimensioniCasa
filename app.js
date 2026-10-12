@@ -1,6 +1,11 @@
 'use strict';
 
 // Tutte le misure sono in centimetri; y cresce verso il basso (come in SVG).
+//
+// Modello: una stanza ha i suoi angoli (r.pts, pareti = lati fra angoli consecutivi) e, sopra,
+// delle "sezioni" (r.features: nicchie e pilastri) e delle aperture (r.openings: porte e finestre).
+// Sezioni e aperture sono ancorate a una parete (dall'inizio o dalla fine), quindi non dipendono
+// da vertici: il contorno vero della stanza si calcola da pareti + sezioni (vedi outline()).
 
 const STORE = 'dimensioniCasa.v1';
 const GRID = 5;     // passo dello snap, cm
@@ -12,6 +17,8 @@ const PRESETS = [
   ['Scrivania', 140, 70], ['Libreria', 80, 30], ['Frigorifero', 60, 65], ['Lavatrice', 60, 60],
 ];
 const COLORS = ['#8fb8de', '#e6b17e', '#a8d5a2', '#d9a7c7', '#f2d57e', '#b5a9e0', '#9ad1cf'];
+const FEAT_NAME = { niche: 'Nicchia', pillar: 'Pilastro' };
+const OPEN_NAME = { door: 'Porta', window: 'Finestra' };
 
 const $ = (s) => document.querySelector(s);
 const uid = () => Math.random().toString(36).slice(2, 8);
@@ -23,10 +30,19 @@ const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&
 /* ---------- stato ---------- */
 
 const rectPts = (w, d) => [{ x: 0, y: 0 }, { x: w, y: 0 }, { x: w, y: d }, { x: 0, y: d }];
-const newRoom = (name, w, d) => ({ id: uid(), name, pts: rectPts(w, d), openings: [], furniture: [] });
+const newRoom = (name, pts) => ({ id: uid(), name, pts, features: [], openings: [], furniture: [] });
+
+// Rettangolo, oppure rettangolo a L (un angolo tagliato: br/bl/tr/tl = basso/alto, destra/sinistra).
+function shapePts(shape, w, d, corner, cw, cd) {
+  if (shape !== 'L') return rectPts(w, d);
+  let p = [{ x: 0, y: 0 }, { x: w, y: 0 }, { x: w, y: d - cd }, { x: w - cw, y: d - cd }, { x: w - cw, y: d }, { x: 0, y: d }];
+  if (corner[1] === 'l') p = p.map((q) => ({ x: w - q.x, y: q.y }));
+  if (corner[0] === 't') p = p.map((q) => ({ x: q.x, y: d - q.y }));
+  return p;
+}
 
 function defaultState() {
-  const r = newRoom('Stanza 1', 400, 350);
+  const r = newRoom('Stanza 1', rectPts(400, 350));
   return { rooms: [r], current: r.id };
 }
 
@@ -38,7 +54,7 @@ function valid(s) {
 function load() {
   try {
     const s = JSON.parse(localStorage.getItem(STORE));
-    return valid(s) ? s : null;
+    return valid(s) ? migrate(s) : null;
   } catch { return null; }
 }
 
@@ -46,8 +62,8 @@ function save() {
   try { localStorage.setItem(STORE, JSON.stringify(state)); } catch { /* storage non disponibile */ }
 }
 
-let state = load() || defaultState();
-const ui = { view: { x: 0, y: 0, k: 0.5 }, sel: null, drag: null, open: {}, draft: {} };
+let state = null; // caricato in fondo al file, quando tutte le funzioni sono definite
+const ui = { view: { x: 0, y: 0, k: 0.5 }, sel: null, drag: null, open: { adv: false }, draft: {} };
 const history = [];
 
 const room = () => state.rooms.find((r) => r.id === state.current) || state.rooms[0];
@@ -73,13 +89,63 @@ function signedArea(p) {
   return s / 2;
 }
 
-// Parete i: dal vertice i al vertice i+1. n = normale verso l'esterno della stanza.
+// Parete i: dall'angolo i all'angolo i+1. n = normale verso l'esterno della stanza.
 function edge(r, i) {
   const n = r.pts.length, a = r.pts[i % n], b = r.pts[(i + 1) % n];
   const dx = b.x - a.x, dy = b.y - a.y, len = Math.hypot(dx, dy);
   const u = len ? { x: dx / len, y: dy / len } : { x: 1, y: 0 };
   const o = signedArea(r.pts) > 0 ? 1 : -1;
   return { a, b, len, u, n: { x: u.y * o, y: -u.x * o } };
+}
+
+// Sezioni e aperture sono ancorate all'inizio o alla fine della parete (o.from).
+// offset = distanza dal lato di ancoraggio al bordo più vicino.
+const opStart = (o, len) => (o.from === 'end' ? len - o.offset - o.width : o.offset);
+const setOpStart = (o, len, s) => { o.offset = o.from === 'end' ? len - s - o.width : s; };
+const items = (r) => [...r.features, ...r.openings];
+const findItem = (r, id) => items(r).find((x) => x.id === id);
+
+function span(r, o) {
+  const e = edge(r, o.wall), s = opStart(o, e.len);
+  return { e, s, t: s + o.width };
+}
+
+// Sezione valida: dentro la parete, misure positive.
+function featFits(r, f) {
+  if (f.wall >= r.pts.length || !(f.width > 0) || !(f.depth > 0)) return false;
+  const { e, s, t } = span(r, f);
+  return s >= -0.01 && t <= e.len + 0.01;
+}
+
+// Mappa id -> true per sezioni che non entrano o che si sovrappongono a un'altra sulla stessa parete.
+function featProblems(r) {
+  const bad = {};
+  for (const f of r.features) {
+    if (!featFits(r, f)) { bad[f.id] = true; continue; }
+    const a = span(r, f);
+    for (const g of r.features) {
+      if (g === f || g.wall !== f.wall || !featFits(r, g)) continue;
+      const b = span(r, g);
+      if (a.s < b.t - 0.01 && b.s < a.t - 0.01) { bad[f.id] = true; bad[g.id] = true; }
+    }
+  }
+  return bad;
+}
+
+// Contorno reale della stanza: angoli + sezioni applicate alle pareti.
+function outline(r) {
+  const ring = [], bad = featProblems(r);
+  r.pts.forEach((p, i) => {
+    ring.push(p);
+    const e = edge(r, i);
+    const fs = r.features.filter((f) => f.wall === i && !bad[f.id]).map((f) => ({ f, s: opStart(f, e.len) })).sort((a, b) => a.s - b.s);
+    for (const { f, s } of fs) {
+      const sg = f.type === 'niche' ? 1 : -1;
+      const P = (t, dep) => ({ x: e.a.x + e.u.x * t + e.n.x * sg * dep, y: e.a.y + e.u.y * t + e.n.y * sg * dep });
+      ring.push(P(s, 0), P(s, f.depth), P(s + f.width, f.depth), P(s + f.width, 0));
+    }
+  });
+  return ring;
 }
 
 function inPoly(p, pts) {
@@ -96,11 +162,11 @@ function corners(f, shrink = 0) {
   return [[-hw, -hd], [hw, -hd], [hw, hd], [-hw, hd]].map(([x, y]) => ({ x: f.x + x * c - y * s, y: f.y + x * s + y * c }));
 }
 
-function outside(f, r) {
-  if (corners(f, 0.5).some((p) => !inPoly(p, r.pts))) return true;
-  // un vertice rientrante della stanza non deve cadere dentro il mobile
+function outside(f, ring) {
+  if (corners(f, 0.5).some((p) => !inPoly(p, ring))) return true;
+  // un angolo rientrante del contorno non deve cadere dentro il mobile
   const t = (-f.rot * Math.PI) / 180, c = Math.cos(t), s = Math.sin(t);
-  return r.pts.some((p) => {
+  return ring.some((p) => {
     const dx = p.x - f.x, dy = p.y - f.y;
     return Math.abs(dx * c - dy * s) < f.w / 2 - 0.5 && Math.abs(dx * s + dy * c) < f.d / 2 - 0.5;
   });
@@ -121,8 +187,8 @@ function overlap(a, b) {
 }
 
 function furnStatus(r) {
-  const m = {};
-  for (const f of r.furniture) m[f.id] = { out: outside(f, r), ov: false };
+  const ring = outline(r), m = {};
+  for (const f of r.furniture) m[f.id] = { out: outside(f, ring), ov: false };
   for (let i = 0; i < r.furniture.length; i++) {
     for (let j = i + 1; j < r.furniture.length; j++) {
       if (overlap(r.furniture[i], r.furniture[j])) { m[r.furniture[i].id].ov = true; m[r.furniture[j].id].ov = true; }
@@ -132,12 +198,12 @@ function furnStatus(r) {
 }
 
 // "Calamita": se un lato del mobile è vicino a un muro verticale/orizzontale, lo appoggia.
-function magnet(f, r) {
+function magnet(f, ring) {
   const cs = corners(f), xs = cs.map((p) => p.x), ys = cs.map((p) => p.y);
   const minx = Math.min(...xs), maxx = Math.max(...xs), miny = Math.min(...ys), maxy = Math.max(...ys);
   let bx = null, by = null;
-  for (let i = 0; i < r.pts.length; i++) {
-    const { a, b } = edge(r, i);
+  for (let i = 0; i < ring.length; i++) {
+    const a = ring[i], b = ring[(i + 1) % ring.length];
     if (Math.abs(a.x - b.x) < 0.01 && Math.min(a.y, b.y) < maxy && Math.max(a.y, b.y) > miny) {
       for (const d of [a.x - minx, a.x - maxx]) if (Math.abs(d) <= MAGNET && (bx === null || Math.abs(d) < Math.abs(bx))) bx = d;
     }
@@ -150,33 +216,30 @@ function magnet(f, r) {
 }
 
 function bbox(r) {
-  const pts = [...r.pts, ...r.furniture.flatMap((f) => corners(f))];
+  const pts = [...outline(r), ...r.furniture.flatMap((f) => corners(f))];
   const xs = pts.map((p) => p.x), ys = pts.map((p) => p.y);
   return { x0: Math.min(...xs), x1: Math.max(...xs), y0: Math.min(...ys), y1: Math.max(...ys) };
 }
 
 /* ---------- operazioni sulla forma della stanza ---------- */
 
-// Un'apertura è ancorata all'inizio o alla fine della sua parete (o.from).
-// offset = distanza dal lato di ancoraggio al bordo più vicino dell'apertura.
-const opStart = (o, len) => (o.from === 'end' ? len - o.offset - o.width : o.offset);
-const setOpStart = (o, len, s) => { o.offset = o.from === 'end' ? len - s - o.width : s; };
-
-function insertPt(r, i, d) {
-  const e = edge(r, i), rest = e.len - d;
-  const olds = r.openings.map((o) => ({ o, w: o.wall, s: o.wall < r.pts.length ? opStart(o, edge(r, o.wall).len) : o.offset }));
-  r.pts.splice(i + 1, 0, { x: e.a.x + e.u.x * d, y: e.a.y + e.u.y * d });
-  for (const { o, w, s } of olds) {
-    if (w === i) { if (s >= d) { o.wall = i + 1; setOpStart(o, rest, s - d); } else setOpStart(o, d, s); }
-    else if (w > i) o.wall = w + 1;
-  }
+// Cambia la lunghezza della parete i. Se la parete successiva è perpendicolare si sposta anche
+// l'angolo dopo (cioè tutto il lato opposto), così gli angoli retti restano retti.
+function setWallLen(r, i, L) {
+  const n = r.pts.length, e = edge(r, i);
+  if (!(e.len > 0)) return;
+  const e2 = edge(r, (i + 1) % n), d = { x: e.u.x * (L - e.len), y: e.u.y * (L - e.len) };
+  const move = (k) => { r.pts[k].x += d.x; r.pts[k].y += d.y; };
+  move((i + 1) % n);
+  if (e2.len > 0 && Math.abs(e.u.x * e2.u.x + e.u.y * e2.u.y) < 1e-6) move((i + 2) % n);
 }
 
+// Elimina l'angolo j (le due pareti attorno si fondono) senza perdere sezioni e aperture.
 function deletePt(r, j) {
   const n = r.pts.length;
   if (n <= 3) return;
   const prev = (j - 1 + n) % n, prevLen = edge(r, prev).len, merged = j > 0 ? j - 1 : n - 2;
-  const olds = r.openings.map((o) => ({ o, w: o.wall, s: o.wall < n ? opStart(o, edge(r, o.wall).len) : o.offset }));
+  const olds = items(r).map((o) => ({ o, w: o.wall, s: o.wall < n ? opStart(o, edge(r, o.wall).len) : o.offset }));
   r.pts.splice(j, 1);
   const newLen = edge(r, merged).len;
   for (const { o, w, s } of olds) {
@@ -186,18 +249,50 @@ function deletePt(r, j) {
   }
 }
 
-// Rientro (nicchia nel muro) o sporgenza (pilastro) sulla parete i: 4 nuovi vertici.
-// s = start dalla parte iniziale della parete, w = larghezza, h = profondità, out = true verso l'esterno.
-function addNotch(r, i, s, w, h, out) {
-  const e = edge(r, i), sg = out ? 1 : -1;
-  const P = (t, dep) => ({ x: e.a.x + e.u.x * t + e.n.x * sg * dep, y: e.a.y + e.u.y * t + e.n.y * sg * dep });
-  const olds = r.openings.map((o) => ({ o, w: o.wall, s: o.wall < r.pts.length ? opStart(o, edge(r, o.wall).len) : o.offset }));
-  r.pts.splice(i + 1, 0, P(s, 0), P(s, h), P(s + w, h), P(s + w, 0));
-  const first = edge(r, i).len, last = edge(r, i + 4).len;
-  for (const { o, w: ow, s: os } of olds) {
-    if (ow === i) {
-      if (os >= s + w) { o.wall = i + 4; setOpStart(o, last, os - (s + w)); } else setOpStart(o, first, os);
-    } else if (ow > i) o.wall = ow + 4;
+// Dati salvati prima dell'introduzione delle sezioni: i rientri erano gruppi di 4 vertici sciolti.
+// Li riconosce e li trasforma in nicchie/pilastri; ciò che non riconosce resta com'è (angoli in più).
+function migrate(s) {
+  for (const r of s.rooms) {
+    if (Array.isArray(r.features)) continue;
+    r.features = [];
+    legacyNotches(r);
+  }
+  return s;
+}
+
+function legacyNotches(r) {
+  const eq = (a, b) => Math.abs(a - b) < 0.01;
+  for (let again = true; again;) {
+    again = false;
+    // angoli allineati (nati dal vecchio "doppio clic sulla parete")
+    for (let j = 0; j < r.pts.length && !again && r.pts.length > 3; j++) {
+      const n = r.pts.length, a = r.pts[(j - 1 + n) % n], p = r.pts[j], b = r.pts[(j + 1) % n];
+      const ux = p.x - a.x, uy = p.y - a.y, vx = b.x - p.x, vy = b.y - p.y;
+      if (eq(ux * vy - uy * vx, 0) && ux * vx + uy * vy > 0) { deletePt(r, j); again = true; }
+    }
+    if (again) continue;
+    const n = r.pts.length, o = signedArea(r.pts) > 0 ? 1 : -1;
+    for (let i = 0; i + 4 < n && n - 4 >= 3 && !again; i++) {
+      const [A, P1, P2, P3, P4] = r.pts.slice(i, i + 5), B = r.pts[(i + 5) % n];
+      const L1 = Math.hypot(P1.x - A.x, P1.y - A.y);
+      if (L1 < 0.01) continue;
+      const u = { x: (P1.x - A.x) / L1, y: (P1.y - A.y) / L1 };
+      const along = (p, q) => (q.x - p.x) * u.x + (q.y - p.y) * u.y;
+      const across = (p, q) => (q.x - p.x) * u.y - (q.y - p.y) * u.x;
+      const w = along(P1, P4), h = Math.hypot(P2.x - P1.x, P2.y - P1.y);
+      const ok = eq(across(A, P4), 0) && eq(across(P4, B), 0) && w > 0.01 && along(P4, B) > 0.01 && h > 0.01
+        && eq(along(P1, P2), 0) && eq(P3.x, P2.x + P4.x - P1.x) && eq(P3.y, P2.y + P4.y - P1.y);
+      if (!ok || r.openings.some((op) => op.wall > i && op.wall < i + 4)) continue;
+      const nrm = { x: u.y * o, y: -u.x * o }, outward = (P2.x - P1.x) * nrm.x + (P2.y - P1.y) * nrm.y > 0;
+      const olds = items(r).map((it) => ({ it, w: it.wall, s: opStart(it, edge(r, it.wall).len) }));
+      r.pts.splice(i + 1, 4);
+      const L = edge(r, i).len, t4 = along(A, P4);
+      for (const { it, w: iw, s } of olds) {
+        if (iw === i) { setOpStart(it, L, s); } else if (iw === i + 4) { it.wall = i; setOpStart(it, L, s + t4); } else if (iw > i + 4) it.wall = iw - 4;
+      }
+      r.features.push({ id: uid(), type: outward ? 'niche' : 'pillar', wall: i, from: 'start', offset: along(A, P1), width: w, depth: h });
+      again = true;
+    }
   }
 }
 
@@ -216,27 +311,32 @@ function fit() {
   ui.view = { k, x: W / 2 - ((b.x0 + b.x1) / 2) * k, y: H / 2 - ((b.y0 + b.y1) / 2) * k };
 }
 
+// Numeri "Nicchia 1", "Porta 2"…: contano per tipo, nell'ordine di creazione.
+function names(r) {
+  const cnt = {}, m = {};
+  for (const it of items(r)) { cnt[it.type] = (cnt[it.type] || 0) + 1; m[it.id] = `${FEAT_NAME[it.type] || OPEN_NAME[it.type]} ${cnt[it.type]}`; }
+  return m;
+}
+
 /* ---------- disegno della pianta ---------- */
 
 function renderCanvas() {
-  const r = room(), { x, y, k } = ui.view, sel = ui.sel, st = furnStatus(r);
-  const pts = r.pts.map((p) => `${p.x},${p.y}`).join(' ');
+  const r = room(), { x, y, k } = ui.view, sel = ui.sel, st = furnStatus(r), nm = names(r), fbad = featProblems(r);
+  const ring = outline(r), pts = ring.map((p) => `${p.x},${p.y}`).join(' ');
+  const isSel = (t, key, v) => sel && sel.t === t && sel[key] === v;
   let s = `<rect x="-20000" y="-20000" width="40000" height="40000" fill="url(#g100)"/>`;
   s += `<polygon class="walls" points="${pts}" stroke-width="${WALL * 2}"/>`;
   s += `<polygon class="floor" points="${pts}"/>`;
-
-  r.pts.forEach((_, i) => {
-    const e = edge(r, i);
-    s += `<line class="edge" x1="${e.a.x}" y1="${e.a.y}" x2="${e.b.x}" y2="${e.b.y}"/>`;
-  });
+  s += `<polygon class="edge" points="${pts}"/>`;
 
   for (const o of r.openings) {
     if (o.wall >= r.pts.length) continue;
-    const e = edge(r, o.wall), n = e.n, u = e.u;
-    const st = opStart(o, e.len), a = { x: e.a.x + u.x * st, y: e.a.y + u.y * st };
+    const { e, s: st0 } = span(r, o), n = e.n, u = e.u;
+    const a = { x: e.a.x + u.x * st0, y: e.a.y + u.y * st0 };
     const b = { x: a.x + u.x * o.width, y: a.y + u.y * o.width };
-    const bad = st < 0 || st + o.width > e.len + 0.01;
-    const on = sel && sel.t === 'open' && sel.id === o.id ? ' on' : '';
+    const hitsFeat = r.features.some((f) => f.wall === o.wall && featFits(r, f) && (() => { const q = span(r, f); return st0 < q.t - 0.01 && q.s < st0 + o.width - 0.01; })());
+    const bad = st0 < -0.01 || st0 + o.width > e.len + 0.01 || hitsFeat;
+    const on = isSel('open', 'id', o.id) ? ' on' : '';
     const P = (p, d) => `${p.x + n.x * d},${p.y + n.y * d}`;
     const poly = `${P(a, -2)} ${P(b, -2)} ${P(b, WALL)} ${P(a, WALL)}`;
     if (o.type === 'door') {
@@ -255,14 +355,27 @@ function renderCanvas() {
     }
   }
 
+  // pareti: linea evidenziata se selezionata, area sensibile al clic, etichetta
   r.pts.forEach((_, i) => {
     const e = edge(r, i), m = { x: (e.a.x + e.b.x) / 2 + e.n.x * (WALL + 14 / k), y: (e.a.y + e.b.y) / 2 + e.n.y * (WALL + 14 / k) };
+    if (isSel('wall', 'i', i)) s += `<line class="wsel" x1="${e.a.x}" y1="${e.a.y}" x2="${e.b.x}" y2="${e.b.y}"/>`;
     s += `<line class="hit" data-t="wall" data-i="${i}" x1="${e.a.x}" y1="${e.a.y}" x2="${e.b.x}" y2="${e.b.y}" stroke-width="${16 / k}"/>`;
     s += `<text class="wl" font-size="${11 / k}" x="${m.x}" y="${m.y}">P${i + 1} · ${Math.round(e.len)}</text>`;
   });
 
+  // sezioni (nicchie e pilastri): area cliccabile + etichetta
+  for (const f of r.features) {
+    if (f.wall >= r.pts.length) continue;
+    const e = edge(r, f.wall), a = opStart(f, e.len), sg = f.type === 'niche' ? 1 : -1;
+    const P = (t, dep) => `${e.a.x + e.u.x * t + e.n.x * sg * dep},${e.a.y + e.u.y * t + e.n.y * sg * dep}`;
+    const cx = e.a.x + e.u.x * (a + f.width / 2) + e.n.x * sg * f.depth / 2, cy = e.a.y + e.u.y * (a + f.width / 2) + e.n.y * sg * f.depth / 2;
+    const on = isSel('feat', 'id', f.id) ? ' on' : '', bad = fbad[f.id] ? ' bad' : '';
+    s += `<polygon class="feat${on}${bad}" data-t="feat" data-id="${f.id}" points="${P(a, 0)} ${P(a, f.depth)} ${P(a + f.width, f.depth)} ${P(a + f.width, 0)}"/>`;
+    if (!bad) s += `<text class="wl" font-size="${10 / k}" x="${cx}" y="${cy}">${esc(nm[f.id].replace('Nicchia ', 'N').replace('Pilastro ', 'Pil'))}</text>`;
+  }
+
   for (const f of r.furniture) {
-    const bad = st[f.id].out || st[f.id].ov, on = sel && sel.t === 'furn' && sel.id === f.id;
+    const bad = st[f.id].out || st[f.id].ov, on = isSel('furn', 'id', f.id);
     const fs = Math.max(Math.min(13 / k, f.d / 3, f.w / Math.max(6, f.name.length * 0.62)), 4), dims = f.d >= fs * 3;
     s += `<g transform="translate(${f.x} ${f.y}) rotate(${f.rot})">`
       + `<rect class="fr${on ? ' sel' : ''}${bad ? ' bad' : ''}" data-t="furn" data-id="${f.id}" x="${-f.w / 2}" y="${-f.d / 2}" width="${f.w}" height="${f.d}" fill="${esc(f.color)}"/>`
@@ -270,11 +383,6 @@ function renderCanvas() {
       + (dims ? `<text class="ft" font-size="${fs * 0.8}" y="${fs}">${r1(f.w)}×${r1(f.d)}</text>` : '')
       + `</g>`;
   }
-
-  r.pts.forEach((p, i) => {
-    const on = sel && sel.t === 'pt' && sel.i === i ? ' on' : '';
-    s += `<circle class="vtx${on}" data-t="pt" data-i="${i}" cx="${p.x}" cy="${p.y}" r="${6 / k}"/>`;
-  });
 
   $('#world').setAttribute('transform', `translate(${x} ${y}) scale(${k})`);
   $('#world').innerHTML = s;
@@ -293,7 +401,7 @@ function inp(act, o = {}) {
     + ` type="${o.type || 'number'}"${text ? '' : ' step="any"'} value="${esc(text || o.type === 'color' ? o.val : r1(o.val))}">`;
 }
 
-function sel(act, id, p, value, options) {
+function select(act, id, p, value, options) {
   return `<select data-act="${act}" data-id="${id}" data-p="${p}" data-k="${act}:${id}:${p}">`
     + options.map(([v, label]) => `<option value="${v}"${String(v) === String(value) ? ' selected' : ''}>${esc(label)}</option>`).join('')
     + `</select>`;
@@ -302,59 +410,65 @@ function sel(act, id, p, value, options) {
 const section = (id, title, body) =>
   `<details data-sec="${id}"${ui.open[id] === false ? '' : ' open'}><summary>${title}</summary><div class="body">${body}</div></details>`;
 
+// Campi comuni a sezioni e aperture: parete, ancoraggio, distanza, larghezza.
+function placement(r, o) {
+  const walls = r.pts.map((_, i) => [i, `Parete ${i + 1} (${Math.round(edge(r, i).len)} cm)`]);
+  return `<label>Parete ${select('oset', o.id, 'wall', o.wall, walls)}</label>
+    <label>Misura da ${select('oset', o.id, 'from', o.from === 'end' ? 'end' : 'start', [['start', 'Inizio parete'], ['end', 'Fine parete']])}</label>
+    <label>Distanza (cm) ${inp('oset', { id: o.id, p: 'offset', val: o.offset })}</label>
+    <label>Larghezza (cm) ${inp('oset', { id: o.id, p: 'width', val: o.width })}</label>`;
+}
+
 function renderPanel() {
-  const r = room(), st = furnStatus(r), area = Math.abs(signedArea(r.pts)) / 10000;
+  const r = room(), st = furnStatus(r), nm = names(r), fbad = featProblems(r), area = Math.abs(signedArea(outline(r))) / 10000;
   const focusKey = document.activeElement && document.activeElement.dataset ? document.activeElement.dataset.k : null;
   const d = (k, def) => esc(ui.draft[k] ?? def);
+  const isSel = (t, key, v) => ui.sel && ui.sel.t === t && ui.sel[key] === v;
+  const shapeL = d('nr-shape', 'R') === 'L';
 
   const rooms = `
     <div class="chips">${state.rooms.map((x) =>
       `<button class="chip${x.id === r.id ? ' on' : ''}" data-act="selroom" data-id="${x.id}">${esc(x.name)}</button>`).join('')}</div>
     <div class="row"><label>Nome ${inp('rname', { id: r.id, val: r.name, type: 'text' })}</label></div>
+    <p class="muted">Area: ${area.toFixed(2)} m²</p>
     <div class="row"><button data-act="duproom">Duplica</button>
       <button data-act="delroom"${state.rooms.length < 2 ? ' disabled' : ''}>Elimina stanza</button></div>
-    <div class="sub">Nuova stanza rettangolare (cm)</div>
+    <div class="sub">Nuova stanza (cm)</div>
     <div class="row"><input id="nr-name" type="text" placeholder="Nome" value="${d('nr-name', '')}">
-      <input id="nr-w" type="number" value="${d('nr-w', 400)}"> <span>×</span> <input id="nr-d" type="number" value="${d('nr-d', 300)}">
-      <button data-act="addroom">Aggiungi</button></div>`;
+      <select id="nr-shape"><option value="R"${shapeL ? '' : ' selected'}>Rettangolo</option><option value="L"${shapeL ? ' selected' : ''}>Forma a L</option></select></div>
+    <div class="row"><input id="nr-w" type="number" value="${d('nr-w', 400)}"> <span>×</span> <input id="nr-d" type="number" value="${d('nr-d', 300)}"></div>
+    ${shapeL ? `<div class="row"><span class="muted">Angolo tagliato</span>
+      <select id="nr-corner">${[['br', 'in basso a destra'], ['bl', 'in basso a sinistra'], ['tr', 'in alto a destra'], ['tl', 'in alto a sinistra']]
+        .map(([v, l]) => `<option value="${v}"${d('nr-corner', 'br') === v ? ' selected' : ''}>${l}</option>`).join('')}</select>
+      <input id="nr-cw" type="number" value="${d('nr-cw', 150)}"> <span>×</span> <input id="nr-cd" type="number" value="${d('nr-cd', 150)}"></div>` : ''}
+    <div class="row"><button data-act="addroom">Aggiungi stanza</button></div>`;
 
-  const shape = `
-    <p class="muted">Area: ${area.toFixed(2)} m² · misure interne in cm, y verso il basso.
-      La lunghezza di una parete sposta il vertice successivo. Doppio clic su una parete: nuovo vertice (rientro).</p>
-    <table><thead><tr><th>V</th><th>x</th><th>y</th><th>parete →</th><th></th></tr></thead><tbody>
-    ${r.pts.map((p, i) => `<tr${ui.sel && ui.sel.t === 'pt' && ui.sel.i === i ? ' class="on"' : ''}>
-      <td>${i + 1}</td><td>${inp('ptx', { i, val: p.x })}</td><td>${inp('pty', { i, val: p.y })}</td>
-      <td>${inp('wlen', { i, val: edge(r, i).len })}</td>
-      <td><button data-act="delpt" data-i="${i}" title="Elimina vertice"${r.pts.length <= 3 ? ' disabled' : ''}>✕</button></td></tr>`).join('')}
-    </tbody></table>
-    <div class="sub">Rientro o sporgenza su una parete</div>
-    <div class="grid2">
-      <label>Parete <select id="nn-wall">${r.pts.map((_, i) => `<option value="${i}"${+d('nn-wall', 0) === i ? ' selected' : ''}>Parete ${i + 1} (${Math.round(edge(r, i).len)} cm)</option>`).join('')}</select></label>
-      <label>Tipo <select id="nn-type"><option value="niche"${d('nn-type', 'niche') === 'niche' ? ' selected' : ''}>Rientro (nicchia nel muro)</option><option value="pillar"${d('nn-type', 'niche') === 'pillar' ? ' selected' : ''}>Sporgenza (pilastro)</option></select></label>
-      <label>Misura da <select id="nn-from"><option value="start"${d('nn-from', 'start') === 'start' ? ' selected' : ''}>Inizio parete</option><option value="end"${d('nn-from', 'start') === 'end' ? ' selected' : ''}>Fine parete</option></select></label>
-      <label>Distanza (cm) <input id="nn-s" type="number" value="${d('nn-s', 100)}"></label>
-      <label>Larghezza (cm) <input id="nn-w" type="number" value="${d('nn-w', 100)}"></label>
-      <label>Profondità (cm) <input id="nn-h" type="number" value="${d('nn-h', 30)}"></label>
-    </div>
-    <div class="row"><button data-act="addnotch">Aggiungi</button></div>`;
+  const walls = `
+    <p class="muted">Lunghezza di ogni parete, misurata da angolo ad angolo (anche sopra nicchie e pilastri). Cambiarla sposta anche il lato opposto, così gli angoli restano retti. Clic sul nome per evidenziarla.</p>
+    <table><tbody>${r.pts.map((_, i) => `<tr${isSel('wall', 'i', i) ? ' class="on"' : ''}>
+      <td><b data-act="selwall" data-i="${i}" class="lnk">Parete ${i + 1}</b></td>
+      <td>${inp('wlen', { i, val: edge(r, i).len })}</td><td class="muted">cm</td></tr>`).join('')}</tbody></table>`;
+
+  const feats = `
+    <div class="row"><button data-act="addfeat" data-k="niche">+ Nicchia</button><button data-act="addfeat" data-k="pillar">+ Pilastro</button></div>
+    <p class="muted">Nicchia = rientro nel muro (la stanza guadagna spazio). Pilastro = sporgenza verso l'interno.</p>
+    ${r.features.length ? '' : '<p class="muted">Nessuna nicchia o pilastro.</p>'}
+    ${r.features.map((f) => `<div class="card${isSel('feat', 'id', f.id) ? ' on' : ''}"><div class="row"><b data-act="selfeat" data-id="${f.id}" class="lnk">${nm[f.id]}</b>
+        <button data-act="delfeat" data-id="${f.id}">Elimina</button></div>
+        <div class="grid2">${placement(r, f)}
+          <label>Profondità (cm) ${inp('oset', { id: f.id, p: 'depth', val: f.depth })}</label>
+          <label>Tipo ${select('oset', f.id, 'type', f.type, [['niche', 'Nicchia'], ['pillar', 'Pilastro']])}</label>
+        </div>${fbad[f.id] ? '<p class="muted">⚠ Non entra nella parete o si sovrappone a un\'altra sezione: non viene disegnata.</p>' : ''}</div>`).join('')}`;
 
   const openings = `
     <div class="row"><button data-act="addopen" data-k="door">+ Porta</button><button data-act="addopen" data-k="window">+ Finestra</button></div>
     ${r.openings.length ? '' : '<p class="muted">Nessuna apertura.</p>'}
-    ${r.openings.map((o) => {
-      const on = ui.sel && ui.sel.t === 'open' && ui.sel.id === o.id;
-      const walls = r.pts.map((_, i) => [i, `Parete ${i + 1} (${Math.round(edge(r, i).len)} cm)`]);
-      return `<div class="card${on ? ' on' : ''}"><div class="row"><b data-act="selopen" data-id="${o.id}">${o.type === 'door' ? 'Porta' : 'Finestra'}</b>
-        <button data-act="delopen" data-id="${o.id}" title="Elimina">✕</button></div>
-        <div class="grid2">
-          <label>Parete ${sel('oset', o.id, 'wall', o.wall, walls)}</label>
-          <label>Misura da ${sel('oset', o.id, 'from', o.from === 'end' ? 'end' : 'start', [['start', 'Inizio parete'], ['end', 'Fine parete']])}</label>
-          <label>Distanza (cm) ${inp('oset', { id: o.id, p: 'offset', val: o.offset })}</label>
-          <label>Larghezza (cm) ${inp('oset', { id: o.id, p: 'width', val: o.width })}</label>
-          ${o.type === 'door' ? `<label>Cardine ${sel('oset', o.id, 'hinge', o.hinge, [['start', 'All\'inizio'], ['end', 'Alla fine']])}</label>
-          <label>Apertura ${sel('oset', o.id, 'swing', o.swing, [['in', 'Verso l\'interno'], ['out', 'Verso l\'esterno']])}</label>` : ''}
-        </div></div>`;
-    }).join('')}`;
+    ${r.openings.map((o) => `<div class="card${isSel('open', 'id', o.id) ? ' on' : ''}"><div class="row"><b data-act="selopen" data-id="${o.id}" class="lnk">${nm[o.id]}</b>
+        <button data-act="delopen" data-id="${o.id}">Elimina</button></div>
+        <div class="grid2">${placement(r, o)}
+          ${o.type === 'door' ? `<label>Cardine ${select('oset', o.id, 'hinge', o.hinge, [['start', 'Lato inizio parete'], ['end', 'Lato fine parete']])}</label>
+          <label>Apertura ${select('oset', o.id, 'swing', o.swing, [['in', 'Verso l\'interno'], ['out', 'Verso l\'esterno']])}</label>` : ''}
+        </div></div>`).join('')}`;
 
   const f = ui.sel && ui.sel.t === 'furn' ? r.furniture.find((x) => x.id === ui.sel.id) : null;
   const furniture = `
@@ -377,10 +491,18 @@ function renderPanel() {
       <div class="row"><button data-act="rotf" data-d="-90">⟲ 90°</button><button data-act="rotf" data-d="90">⟳ 90°</button>
         <button data-act="dupf">Duplica</button><button data-act="delf">Elimina</button></div></div>` : ''}`;
 
+  const adv = `
+    <p class="muted">Coordinate degli angoli della stanza (senza nicchie e pilastri). Serve solo per forme particolari: di norma bastano le lunghezze delle pareti. Eliminando un angolo le due pareti vicine si fondono.</p>
+    <table><thead><tr><th>Angolo</th><th>x</th><th>y</th><th></th></tr></thead><tbody>
+    ${r.pts.map((p, i) => `<tr><td>${i + 1}</td><td>${inp('ptx', { i, val: p.x })}</td><td>${inp('pty', { i, val: p.y })}</td>
+      <td><button data-act="delpt" data-i="${i}" title="Elimina angolo"${r.pts.length <= 3 ? ' disabled' : ''}>✕</button></td></tr>`).join('')}
+    </tbody></table>`;
+
   const panel = $('#panel');
   const scroll = panel.scrollTop;
-  panel.innerHTML = section('rooms', 'Stanze', rooms) + section('shape', 'Forma e muri', shape)
-    + section('open', `Porte e finestre (${r.openings.length})`, openings) + section('furn', `Mobili (${r.furniture.length})`, furniture);
+  panel.innerHTML = section('rooms', 'Stanze', rooms) + section('walls', `Pareti (${r.pts.length})`, walls)
+    + section('feat', `Nicchie e pilastri (${r.features.length})`, feats) + section('open', `Porte e finestre (${r.openings.length})`, openings)
+    + section('furn', `Mobili (${r.furniture.length})`, furniture) + section('adv', 'Angoli (avanzato)', adv);
   panel.scrollTop = scroll;
   if (focusKey) {
     const el = panel.querySelector(`[data-k="${CSS.escape(focusKey)}"]`);
@@ -403,7 +525,9 @@ panel.addEventListener('toggle', (e) => {
 
 function keepDraft(e) {
   const id = e.target.id;
-  if (id && /^(nf|nr|nn)-/.test(id)) ui.draft[id] = e.target.value;
+  if (!id || !/^(nf|nr)-/.test(id)) return;
+  ui.draft[id] = e.target.value;
+  if (id === 'nr-shape' && e.type === 'change') renderPanel();
 }
 panel.addEventListener('input', keepDraft);
 panel.addEventListener('change', keepDraft);
@@ -416,40 +540,47 @@ panel.addEventListener('click', (e) => {
   switch (a) {
     case 'selroom': state.current = id; ui.sel = null; fit(); break;
     case 'addroom': {
+      const w = num(ui.draft['nr-w'], 400), d = num(ui.draft['nr-d'], 300), L = ui.draft['nr-shape'] === 'L';
+      const cw = num(ui.draft['nr-cw'], 150), cd = num(ui.draft['nr-cd'], 150);
+      if (w < 50 || d < 50) { alert('La stanza deve essere almeno 50 × 50 cm.'); return; }
+      if (L && (cw < 10 || cd < 10 || cw > w - 10 || cd > d - 10)) { alert('Il taglio dell\'angolo deve stare dentro il rettangolo (lasciando almeno 10 cm).'); return; }
       snap();
-      const w = Math.max(50, num(ui.draft['nr-w'], 400)), d = Math.max(50, num(ui.draft['nr-d'], 300));
-      const nr = newRoom((ui.draft['nr-name'] || '').trim() || `Stanza ${state.rooms.length + 1}`, w, d);
+      const nr = newRoom((ui.draft['nr-name'] || '').trim() || `Stanza ${state.rooms.length + 1}`, shapePts(L ? 'L' : 'R', w, d, ui.draft['nr-corner'] || 'br', cw, cd));
       state.rooms.push(nr); state.current = nr.id; ui.sel = null; ui.draft['nr-name'] = ''; fit(); break;
     }
     case 'duproom': {
       snap();
       const c = JSON.parse(JSON.stringify(r));
       c.id = uid(); c.name += ' (copia)';
-      c.openings.forEach((o) => { o.id = uid(); }); c.furniture.forEach((x) => { x.id = uid(); });
+      for (const it of [...c.openings, ...c.features, ...c.furniture]) it.id = uid();
       state.rooms.push(c); state.current = c.id; ui.sel = null; break;
     }
     case 'delroom':
       if (state.rooms.length < 2 || !confirm(`Eliminare "${r.name}" con tutti i suoi mobili?`)) return;
       snap(); state.rooms = state.rooms.filter((x) => x !== r); state.current = state.rooms[0].id; ui.sel = null; fit(); break;
-    case 'delpt': snap(); deletePt(r, i); ui.sel = null; break;
+    case 'selwall': ui.sel = { t: 'wall', i }; break;
+    case 'delpt':
+      if (r.pts.length <= 3 || !confirm('Eliminare questo angolo? Le due pareti vicine si fonderanno in una.')) return;
+      snap(); deletePt(r, i); ui.sel = null; break;
+    case 'addfeat': {
+      snap();
+      const len = edge(r, 0).len, w = Math.min(100, Math.round(len * 0.4));
+      const nf = { id: uid(), type: el.dataset.k, wall: 0, from: 'start', offset: Math.round(Math.max(0, (len - w) / 2)), width: w, depth: 30 };
+      r.features.push(nf); ui.sel = { t: 'feat', id: nf.id }; break;
+    }
+    case 'selfeat': ui.sel = { t: 'feat', id }; break;
+    case 'delfeat': snap(); r.features = r.features.filter((x) => x.id !== id); ui.sel = null; break;
     case 'addopen': {
       snap();
       const door = el.dataset.k === 'door';
       const o = { id: uid(), type: door ? 'door' : 'window', wall: 0, from: 'start', offset: 50, width: door ? 80 : 120, hinge: 'start', swing: 'in' };
       r.openings.push(o); ui.sel = { t: 'open', id: o.id }; break;
     }
-    case 'addnotch': {
-      const wi = Math.min(r.pts.length - 1, Math.max(0, Math.round(num(ui.draft['nn-wall'], 0))));
-      const len = edge(r, wi).len, w = num(ui.draft['nn-w'], 100), h = num(ui.draft['nn-h'], 30), dist = num(ui.draft['nn-s'], 100);
-      const s0 = (ui.draft['nn-from'] || 'start') === 'end' ? len - dist - w : dist;
-      if (w < 1 || h < 1 || s0 < 1 || s0 + w > len - 1) { alert(`Non entra nella parete ${wi + 1} (${Math.round(len)} cm): controlla distanza e larghezza.`); return; }
-      snap(); addNotch(r, wi, s0, w, h, ui.draft['nn-type'] !== 'pillar'); ui.sel = null; break;
-    }
     case 'selopen': ui.sel = { t: 'open', id }; break;
     case 'delopen': snap(); r.openings = r.openings.filter((o) => o.id !== id); ui.sel = null; break;
     case 'addfurn': {
       snap();
-      const b = bbox({ pts: r.pts, furniture: [] });
+      const b = bbox({ pts: r.pts, features: [], furniture: [] });
       const nf = {
         id: uid(), name: (ui.draft['nf-name'] || '').trim() || 'Mobile',
         w: Math.max(1, num(ui.draft['nf-w'], 100)), d: Math.max(1, num(ui.draft['nf-d'], 50)),
@@ -488,18 +619,17 @@ panel.addEventListener('change', (e) => {
     case 'rname': r.name = el.value.trim() || r.name; break;
     case 'ptx': r.pts[i].x = num(el.value, r.pts[i].x); break;
     case 'pty': r.pts[i].y = num(el.value, r.pts[i].y); break;
-    case 'wlen': {
-      const e2 = edge(r, i);
-      if (e2.len > 0) { const L = Math.max(1, num(el.value, e2.len)); e2.b.x = e2.a.x + e2.u.x * L; e2.b.y = e2.a.y + e2.u.y * L; }
-      break;
-    }
-    case 'oset': {
-      const o = r.openings.find((x) => x.id === id);
+    case 'wlen': setWallLen(r, i, Math.max(1, num(el.value, edge(r, i).len))); break;
+    case 'oset': { // vale sia per aperture sia per sezioni
+      const o = findItem(r, id);
       if (!o) return;
-      if (p === 'hinge' || p === 'swing') o[p] = el.value;
-      else if (p === 'from') { const len = edge(r, o.wall).len, st = opStart(o, len); o.from = el.value; setOpStart(o, len, st); }
+      const isOpening = o.type === 'door' || o.type === 'window';
+      if (p === 'hinge' || p === 'swing' || p === 'type') o[p] = el.value;
+      else if (p === 'from') { const len = edge(r, o.wall).len, s0 = opStart(o, len); o.from = el.value; setOpStart(o, len, s0); }
       else if (p === 'wall') o.wall = +el.value;
-      else o[p] = p === 'width' ? Math.max(10, num(el.value, o.width)) : num(el.value, o[p]);
+      else if (p === 'width') o.width = Math.max(isOpening ? 10 : 1, num(el.value, o.width));
+      else if (p === 'depth') o.depth = Math.max(1, num(el.value, o.depth));
+      else o[p] = num(el.value, o[p]);
       break;
     }
     case 'fset': {
@@ -521,43 +651,25 @@ panel.addEventListener('change', (e) => {
 
 /* ---------- interazione sulla pianta ---------- */
 
-function addVertexOnWall(r, i, p, free) {
-  const ed = edge(r, i);
-  let d = (p.x - ed.a.x) * ed.u.x + (p.y - ed.a.y) * ed.u.y;
-  if (!free) d = snapTo(d);
-  if (d < 5 || d > ed.len - 5) return;
-  snap(); insertPt(r, i, d); ui.sel = { t: 'pt', i: i + 1 }; commit();
-}
-
 svg.addEventListener('pointerdown', (e) => {
   if (e.button !== 0 && e.button !== 1) return;
   const t = e.target.closest('[data-t]'), p = toWorld(e), r = room();
   svg.setPointerCapture(e.pointerId);
   const base = { sx: e.clientX, sy: e.clientY, moved: false };
+  const pan = { ...base, kind: 'pan', vx: ui.view.x, vy: ui.view.y };
+  ui.drag = null;
   if (t && t.dataset.t === 'furn') {
     const f = r.furniture.find((x) => x.id === t.dataset.id);
     ui.sel = { t: 'furn', id: f.id };
     ui.drag = { ...base, kind: 'furn', f, ox: p.x - f.x, oy: p.y - f.y };
-  } else if (t && t.dataset.t === 'pt') {
-    ui.sel = { t: 'pt', i: +t.dataset.i };
-    ui.drag = { ...base, kind: 'pt', pt: r.pts[+t.dataset.i] };
-  } else if (t && t.dataset.t === 'wall') {
-    // doppio clic fatto a mano: il ridisegno al primo clic distrugge l'elemento e il browser non emette 'dblclick'
-    const now = Date.now(), last = ui.lastWall;
-    ui.lastWall = { i: +t.dataset.i, at: now, x: e.clientX, y: e.clientY };
-    if (last && last.i === +t.dataset.i && now - last.at < 400 && Math.hypot(e.clientX - last.x, e.clientY - last.y) < 6) {
-      ui.lastWall = null;
-      addVertexOnWall(r, +t.dataset.i, p, e.altKey);
-      return;
-    }
-    ui.sel = null;
-    ui.drag = { ...base, kind: 'pan', vx: ui.view.x, vy: ui.view.y };
+  } else if (t && t.dataset.t === 'feat') {
+    ui.sel = { t: 'feat', id: t.dataset.id }; ui.drag = pan;
   } else if (t && t.dataset.t === 'open') {
-    ui.sel = { t: 'open', id: t.dataset.id };
-    ui.drag = null;
+    ui.sel = { t: 'open', id: t.dataset.id }; ui.drag = pan;
+  } else if (t && t.dataset.t === 'wall') {
+    ui.sel = { t: 'wall', i: +t.dataset.i }; ui.drag = pan;
   } else {
-    ui.sel = null;
-    ui.drag = { ...base, kind: 'pan', vx: ui.view.x, vy: ui.view.y };
+    ui.sel = null; ui.drag = pan;
   }
   renderAll();
 });
@@ -568,16 +680,14 @@ svg.addEventListener('pointermove', (e) => {
   if (!d.moved) {
     if (Math.hypot(e.clientX - d.sx, e.clientY - d.sy) < 3) return;
     d.moved = true;
-    if (d.kind !== 'pan') snap();
+    if (d.kind === 'furn') snap();
   }
-  const p = toWorld(e), free = e.altKey;
   if (d.kind === 'pan') {
     ui.view.x = d.vx + e.clientX - d.sx; ui.view.y = d.vy + e.clientY - d.sy;
-  } else if (d.kind === 'pt') {
-    d.pt.x = free ? p.x : snapTo(p.x); d.pt.y = free ? p.y : snapTo(p.y);
   } else {
+    const p = toWorld(e), free = e.altKey;
     d.f.x = p.x - d.ox; d.f.y = p.y - d.oy;
-    if (!free) { d.f.x = snapTo(d.f.x); d.f.y = snapTo(d.f.y); magnet(d.f, room()); }
+    if (!free) { d.f.x = snapTo(d.f.x); d.f.y = snapTo(d.f.y); magnet(d.f, outline(room())); }
   }
   renderCanvas();
 });
@@ -585,7 +695,7 @@ svg.addEventListener('pointermove', (e) => {
 function endDrag() {
   const d = ui.drag;
   ui.drag = null;
-  if (d && d.moved && d.kind !== 'pan') save();
+  if (d && d.moved && d.kind === 'furn') save();
   renderPanel();
 }
 svg.addEventListener('pointerup', endDrag);
@@ -601,9 +711,14 @@ svg.addEventListener('wheel', (e) => {
 
 document.addEventListener('keydown', (e) => {
   if (/^(INPUT|SELECT|TEXTAREA)$/.test(e.target.tagName)) return;
-  const r = room(), f = ui.sel && ui.sel.t === 'furn' ? r.furniture.find((x) => x.id === ui.sel.id) : null;
+  const r = room(), sel = ui.sel, f = sel && sel.t === 'furn' ? r.furniture.find((x) => x.id === sel.id) : null;
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); undo(); return; }
   if (e.key === 'Escape') { ui.sel = null; renderAll(); return; }
+  if ((e.key === 'Delete' || e.key === 'Backspace') && sel && (sel.t === 'feat' || sel.t === 'open')) {
+    snap();
+    if (sel.t === 'feat') r.features = r.features.filter((x) => x.id !== sel.id); else r.openings = r.openings.filter((x) => x.id !== sel.id);
+    ui.sel = null; commit(); return;
+  }
   if (!f) return;
   if (e.key === 'Delete' || e.key === 'Backspace') { snap(); r.furniture = r.furniture.filter((x) => x !== f); ui.sel = null; }
   else if (e.key.toLowerCase() === 'r') { snap(); f.rot = (f.rot + (e.shiftKey ? 270 : 90)) % 360; }
@@ -637,7 +752,7 @@ $('#file').addEventListener('change', async (e) => {
     if (!valid(s)) throw new Error('formato non valido');
     if (!confirm('Importare il file sostituisce tutte le stanze attuali. Continuare?')) return;
     snap();
-    state = s;
+    state = migrate(s);
     if (!state.rooms.some((r) => r.id === state.current)) state.current = state.rooms[0].id;
     ui.sel = null; fit(); commit();
   } catch (err) { alert(`Impossibile importare il file: ${err.message}`); }
@@ -645,5 +760,6 @@ $('#file').addEventListener('change', async (e) => {
 
 window.addEventListener('resize', () => { fit(); renderCanvas(); });
 
+state = load() || defaultState();
 fit();
 renderAll();

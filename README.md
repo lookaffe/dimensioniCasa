@@ -7,8 +7,9 @@ Configuratore visuale, in pianta (2D), per provare la disposizione dei mobili ne
 Nessuna installazione né build: apri `index.html` in un browser. Per pubblicarlo basta GitHub Pages (branch `main`, cartella radice).
 
 - **Stanze**: più stanze, ognuna con un nome. Si parte da un rettangolo e lo si modifica.
-- **Forma e muri**: ogni stanza è un poligono, quindi si possono fare L, rientri e sporgenze. Si modifica da tabella (coordinate dei vertici, lunghezza di ogni parete) o trascinando i vertici. Doppio clic su una parete aggiunge un vertice. Per rientri e pilastri c'è il modulo «Rientro o sporgenza»: scegli parete, tipo, distanza, larghezza e profondità e crea i 4 vertici in un colpo.
-- **Porte e finestre**: posizionate su una parete indicando larghezza e distanza misurata **dall'inizio o dalla fine** della parete (cambiando ancoraggio la posizione non si sposta; allungando la parete l'apertura resta alla stessa distanza dal lato scelto); per le porte anche cardine e verso di apertura (disegnato l'arco).
+- **Pareti**: elenco con la lunghezza di ogni parete, da angolo ad angolo. Cambiarla sposta anche il lato opposto, così gli angoli restano retti. Una stanza nuova può essere un rettangolo o una forma a L.
+- **Nicchie e pilastri**: sono sezioni a parte, ognuna con la sua scheda e il suo «Elimina». Si indicano parete, distanza dall'inizio o dalla fine, larghezza e profondità. Nicchia = rientro nel muro; pilastro = sporgenza verso l'interno. Se una sezione non entra nella parete o ne copre un'altra viene segnalata e non disegnata.
+- **Porte e finestre**: posizionate su una parete (di quelle dell'elenco «Pareti») indicando larghezza e distanza misurata **dall'inizio o dalla fine** della parete (cambiando ancoraggio la posizione non si sposta; allungando la parete l'apertura resta alla stessa distanza dal lato scelto); per le porte anche cardine e verso di apertura (disegnato l'arco).
 - **Mobili**: nome, larghezza × profondità, posizione e rotazione. Si trascinano; si "attaccano" ai muri vicini (Alt disattiva snap e calamita). Un ⚠ segnala mobili fuori dalla stanza o sovrapposti.
 - **Tasti**: `R` ruota di 90°, `Canc` elimina, frecce spostano di 5 cm (Maiusc: 1 cm), `Ctrl+Z` annulla.
 - **Dati**: salvati in automatico nel browser (localStorage). `Esporta`/`Importa` per backup in JSON.
@@ -16,7 +17,8 @@ Nessuna installazione né build: apri `index.html` in un browser. Per pubblicarl
 ## Convenzioni
 
 - Misure in **centimetri**; `y` cresce verso il basso. Le misure dei muri sono quelle **interne** della stanza; lo spessore disegnato è solo grafico.
-- Parete *i* = dal vertice *i* al vertice *i+1* (numerazione da 1 nell'interfaccia).
+- Parete *i* = dall'angolo *i* all'angolo *i+1* (numerazione da 1 nell'interfaccia). Nicchie, pilastri, porte e finestre sono ancorati a una parete e non dipendono dagli angoli.
+- Gli angoli si vedono solo nella sezione «Angoli (avanzato)», chiusa di default.
 
 ## Limiti noti
 
