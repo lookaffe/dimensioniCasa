@@ -157,12 +157,18 @@ function bbox(r) {
 
 /* ---------- operazioni sulla forma della stanza ---------- */
 
+// Un'apertura è ancorata all'inizio o alla fine della sua parete (o.from).
+// offset = distanza dal lato di ancoraggio al bordo più vicino dell'apertura.
+const opStart = (o, len) => (o.from === 'end' ? len - o.offset - o.width : o.offset);
+const setOpStart = (o, len, s) => { o.offset = o.from === 'end' ? len - s - o.width : s; };
+
 function insertPt(r, i, d) {
-  const e = edge(r, i);
+  const e = edge(r, i), rest = e.len - d;
+  const olds = r.openings.map((o) => ({ o, w: o.wall, s: o.wall < r.pts.length ? opStart(o, edge(r, o.wall).len) : o.offset }));
   r.pts.splice(i + 1, 0, { x: e.a.x + e.u.x * d, y: e.a.y + e.u.y * d });
-  for (const o of r.openings) {
-    if (o.wall === i && o.offset >= d) { o.wall = i + 1; o.offset -= d; }
-    else if (o.wall > i) o.wall += 1;
+  for (const { o, w, s } of olds) {
+    if (w === i) { if (s >= d) { o.wall = i + 1; setOpStart(o, rest, s - d); } else setOpStart(o, d, s); }
+    else if (w > i) o.wall = w + 1;
   }
 }
 
@@ -170,12 +176,29 @@ function deletePt(r, j) {
   const n = r.pts.length;
   if (n <= 3) return;
   const prev = (j - 1 + n) % n, prevLen = edge(r, prev).len, merged = j > 0 ? j - 1 : n - 2;
-  for (const o of r.openings) {
-    if (o.wall === prev) o.wall = merged;
-    else if (o.wall === j) { o.wall = merged; o.offset += prevLen; }
-    else if (o.wall > j) o.wall -= 1;
-  }
+  const olds = r.openings.map((o) => ({ o, w: o.wall, s: o.wall < n ? opStart(o, edge(r, o.wall).len) : o.offset }));
   r.pts.splice(j, 1);
+  const newLen = edge(r, merged).len;
+  for (const { o, w, s } of olds) {
+    if (w === prev) { o.wall = merged; setOpStart(o, newLen, s); }
+    else if (w === j) { o.wall = merged; setOpStart(o, newLen, s + prevLen); }
+    else if (w > j) o.wall = w - 1;
+  }
+}
+
+// Rientro (nicchia nel muro) o sporgenza (pilastro) sulla parete i: 4 nuovi vertici.
+// s = start dalla parte iniziale della parete, w = larghezza, h = profondità, out = true verso l'esterno.
+function addNotch(r, i, s, w, h, out) {
+  const e = edge(r, i), sg = out ? 1 : -1;
+  const P = (t, dep) => ({ x: e.a.x + e.u.x * t + e.n.x * sg * dep, y: e.a.y + e.u.y * t + e.n.y * sg * dep });
+  const olds = r.openings.map((o) => ({ o, w: o.wall, s: o.wall < r.pts.length ? opStart(o, edge(r, o.wall).len) : o.offset }));
+  r.pts.splice(i + 1, 0, P(s, 0), P(s, h), P(s + w, h), P(s + w, 0));
+  const first = edge(r, i).len, last = edge(r, i + 4).len;
+  for (const { o, w: ow, s: os } of olds) {
+    if (ow === i) {
+      if (os >= s + w) { o.wall = i + 4; setOpStart(o, last, os - (s + w)); } else setOpStart(o, first, os);
+    } else if (ow > i) o.wall = ow + 4;
+  }
 }
 
 /* ---------- vista ---------- */
@@ -210,9 +233,9 @@ function renderCanvas() {
   for (const o of r.openings) {
     if (o.wall >= r.pts.length) continue;
     const e = edge(r, o.wall), n = e.n, u = e.u;
-    const a = { x: e.a.x + u.x * o.offset, y: e.a.y + u.y * o.offset };
+    const st = opStart(o, e.len), a = { x: e.a.x + u.x * st, y: e.a.y + u.y * st };
     const b = { x: a.x + u.x * o.width, y: a.y + u.y * o.width };
-    const bad = o.offset < 0 || o.offset + o.width > e.len + 0.01;
+    const bad = st < 0 || st + o.width > e.len + 0.01;
     const on = sel && sel.t === 'open' && sel.id === o.id ? ' on' : '';
     const P = (p, d) => `${p.x + n.x * d},${p.y + n.y * d}`;
     const poly = `${P(a, -2)} ${P(b, -2)} ${P(b, WALL)} ${P(a, WALL)}`;
@@ -303,7 +326,17 @@ function renderPanel() {
       <td>${i + 1}</td><td>${inp('ptx', { i, val: p.x })}</td><td>${inp('pty', { i, val: p.y })}</td>
       <td>${inp('wlen', { i, val: edge(r, i).len })}</td>
       <td><button data-act="delpt" data-i="${i}" title="Elimina vertice"${r.pts.length <= 3 ? ' disabled' : ''}>✕</button></td></tr>`).join('')}
-    </tbody></table>`;
+    </tbody></table>
+    <div class="sub">Rientro o sporgenza su una parete</div>
+    <div class="grid2">
+      <label>Parete <select id="nn-wall">${r.pts.map((_, i) => `<option value="${i}"${+d('nn-wall', 0) === i ? ' selected' : ''}>Parete ${i + 1} (${Math.round(edge(r, i).len)} cm)</option>`).join('')}</select></label>
+      <label>Tipo <select id="nn-type"><option value="niche"${d('nn-type', 'niche') === 'niche' ? ' selected' : ''}>Rientro (nicchia nel muro)</option><option value="pillar"${d('nn-type', 'niche') === 'pillar' ? ' selected' : ''}>Sporgenza (pilastro)</option></select></label>
+      <label>Misura da <select id="nn-from"><option value="start"${d('nn-from', 'start') === 'start' ? ' selected' : ''}>Inizio parete</option><option value="end"${d('nn-from', 'start') === 'end' ? ' selected' : ''}>Fine parete</option></select></label>
+      <label>Distanza (cm) <input id="nn-s" type="number" value="${d('nn-s', 100)}"></label>
+      <label>Larghezza (cm) <input id="nn-w" type="number" value="${d('nn-w', 100)}"></label>
+      <label>Profondità (cm) <input id="nn-h" type="number" value="${d('nn-h', 30)}"></label>
+    </div>
+    <div class="row"><button data-act="addnotch">Aggiungi</button></div>`;
 
   const openings = `
     <div class="row"><button data-act="addopen" data-k="door">+ Porta</button><button data-act="addopen" data-k="window">+ Finestra</button></div>
@@ -315,7 +348,8 @@ function renderPanel() {
         <button data-act="delopen" data-id="${o.id}" title="Elimina">✕</button></div>
         <div class="grid2">
           <label>Parete ${sel('oset', o.id, 'wall', o.wall, walls)}</label>
-          <label>Dall'inizio parete (cm) ${inp('oset', { id: o.id, p: 'offset', val: o.offset })}</label>
+          <label>Misura da ${sel('oset', o.id, 'from', o.from === 'end' ? 'end' : 'start', [['start', 'Inizio parete'], ['end', 'Fine parete']])}</label>
+          <label>Distanza (cm) ${inp('oset', { id: o.id, p: 'offset', val: o.offset })}</label>
           <label>Larghezza (cm) ${inp('oset', { id: o.id, p: 'width', val: o.width })}</label>
           ${o.type === 'door' ? `<label>Cardine ${sel('oset', o.id, 'hinge', o.hinge, [['start', 'All\'inizio'], ['end', 'Alla fine']])}</label>
           <label>Apertura ${sel('oset', o.id, 'swing', o.swing, [['in', 'Verso l\'interno'], ['out', 'Verso l\'esterno']])}</label>` : ''}
@@ -367,10 +401,12 @@ panel.addEventListener('toggle', (e) => {
   if (e.target.dataset && e.target.dataset.sec) ui.open[e.target.dataset.sec] = e.target.open;
 }, true);
 
-panel.addEventListener('input', (e) => {
+function keepDraft(e) {
   const id = e.target.id;
-  if (id && /^(nf|nr)-/.test(id)) ui.draft[id] = e.target.value;
-});
+  if (id && /^(nf|nr|nn)-/.test(id)) ui.draft[id] = e.target.value;
+}
+panel.addEventListener('input', keepDraft);
+panel.addEventListener('change', keepDraft);
 
 panel.addEventListener('click', (e) => {
   const el = e.target.closest('[data-act]');
@@ -399,8 +435,15 @@ panel.addEventListener('click', (e) => {
     case 'addopen': {
       snap();
       const door = el.dataset.k === 'door';
-      const o = { id: uid(), type: door ? 'door' : 'window', wall: 0, offset: 50, width: door ? 80 : 120, hinge: 'start', swing: 'in' };
+      const o = { id: uid(), type: door ? 'door' : 'window', wall: 0, from: 'start', offset: 50, width: door ? 80 : 120, hinge: 'start', swing: 'in' };
       r.openings.push(o); ui.sel = { t: 'open', id: o.id }; break;
+    }
+    case 'addnotch': {
+      const wi = Math.min(r.pts.length - 1, Math.max(0, Math.round(num(ui.draft['nn-wall'], 0))));
+      const len = edge(r, wi).len, w = num(ui.draft['nn-w'], 100), h = num(ui.draft['nn-h'], 30), dist = num(ui.draft['nn-s'], 100);
+      const s0 = (ui.draft['nn-from'] || 'start') === 'end' ? len - dist - w : dist;
+      if (w < 1 || h < 1 || s0 < 1 || s0 + w > len - 1) { alert(`Non entra nella parete ${wi + 1} (${Math.round(len)} cm): controlla distanza e larghezza.`); return; }
+      snap(); addNotch(r, wi, s0, w, h, ui.draft['nn-type'] !== 'pillar'); ui.sel = null; break;
     }
     case 'selopen': ui.sel = { t: 'open', id }; break;
     case 'delopen': snap(); r.openings = r.openings.filter((o) => o.id !== id); ui.sel = null; break;
@@ -454,6 +497,7 @@ panel.addEventListener('change', (e) => {
       const o = r.openings.find((x) => x.id === id);
       if (!o) return;
       if (p === 'hinge' || p === 'swing') o[p] = el.value;
+      else if (p === 'from') { const len = edge(r, o.wall).len, st = opStart(o, len); o.from = el.value; setOpStart(o, len, st); }
       else if (p === 'wall') o.wall = +el.value;
       else o[p] = p === 'width' ? Math.max(10, num(el.value, o.width)) : num(el.value, o[p]);
       break;
