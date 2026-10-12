@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dimensioniCasa</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>dimensioniCasa</h1>
+  <nav>
+    <button id="b-undo" title="Annulla (Ctrl+Z)">Annulla</button>
+    <button id="b-fit" title="Adatta la vista alla stanza">Adatta vista</button>
+    <button id="b-export">Esporta</button>
+    <button id="b-import">Importa</button>
+  </nav>
+</header>
+<main>
+  <section id="stage">
+    <svg id="plan" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <pattern id="g100" width="100" height="100" patternUnits="userSpaceOnUse">
+          <path d="M100 0H0V100" class="gridline"/>
+        </pattern>
+      </defs>
+      <g id="world"></g>
+      <g id="overlay"></g>
+    </svg>
+    <div id="hint">Trascina mobili e vertici · doppio clic su una parete per aggiungere un rientro · rotella: zoom · R: ruota · Canc: elimina · Alt: senza snap</div>
+  </section>
+  <aside id="panel"></aside>
+</main>
+<input type="file" id="file" accept="application/json,.json" hidden>
+<script src="app.js"></script>
+</body>
+</html>
