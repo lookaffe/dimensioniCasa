@@ -51,9 +51,9 @@ main { flex: 1; min-height: 0; display: flex; }
 #plan { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; cursor: grab; }
 #plan:active { cursor: grabbing; }
 #hint {
-  position: absolute; left: 150px; bottom: 8px; right: 12px;
+  position: absolute; left: 12px; top: 8px; right: 12px;
   font-size: 12px; color: var(--muted); pointer-events: none;
-  text-align: right;
+  text-align: left;
 }
 #panel {
   width: 360px;
@@ -125,6 +125,7 @@ tr.on td { background: color-mix(in srgb, var(--accent) 12%, transparent); }
 .qd { fill: var(--accent); pointer-events: none; }
 .qd.qf { fill: #e07b00; }
 .ql { fill: var(--accent); font-weight: 600; }
+.ql.qft { fill: #e07b00; }
 .rline { stroke: var(--accent); stroke-width: 1.5; vector-effect: non-scaling-stroke; pointer-events: none; }
 .rot { fill: var(--panel); stroke: var(--accent); stroke-width: 2; vector-effect: non-scaling-stroke; cursor: grab; }
 .head { fill: #8a5a3c; stroke: rgba(0,0,0,.55); stroke-width: 1; vector-effect: non-scaling-stroke; pointer-events: none; }

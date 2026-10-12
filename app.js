@@ -199,8 +199,8 @@ function furnStatus(r) {
   return m;
 }
 
-// Distanza dalla mezzeria di ciascun lato del mobile al primo ostacolo davanti a quel lato
-// (muro del contorno reale oppure un altro mobile), misurata perpendicolarmente al lato.
+// Per ciascun lato del mobile, dalla sua mezzeria in direzione perpendicolare al lato:
+// sempre la distanza dal muro (contorno reale), e in più quella dal primo altro mobile se sta davanti al muro.
 function rayHit(o, d, a, b) {
   const ex = b.x - a.x, ey = b.y - a.y, den = d.x * ey - d.y * ex;
   if (Math.abs(den) < 1e-9) return null;
@@ -220,16 +220,19 @@ function quotes(r, f) {
     const q = corners(g);
     for (let i = 0; i < 4; i++) segs.push([q[i], q[(i + 1) % 4], 'furn']);
   }
-  return [[0, -1], [1, 0], [0, 1], [-1, 0]].map(([lx, ly]) => {
+  const out = [];
+  for (const [lx, ly] of [[0, -1], [1, 0], [0, 1], [-1, 0]]) {
     const dir = { x: lx * c - ly * sn, y: lx * sn + ly * c }, half = lx ? f.w / 2 : f.d / 2;
-    const o = { x: f.x + dir.x * half, y: f.y + dir.y * half };
-    let best = null;
+    const o = { x: f.x + dir.x * half, y: f.y + dir.y * half }, best = { wall: null, furn: null };
     for (const [a, b, kind] of segs) {
       const h = rayHit(o, dir, a, b);
-      if (h !== null && (best === null || h < best.d)) best = { d: h, kind };
+      if (h !== null && (best[kind] === null || h < best[kind])) best[kind] = h;
     }
-    return best && { a: o, b: { x: o.x + dir.x * best.d, y: o.y + dir.y * best.d }, d: best.d, kind: best.kind };
-  }).filter(Boolean);
+    const add = (d, kind) => out.push({ a: o, b: { x: o.x + dir.x * d, y: o.y + dir.y * d }, d, kind, dir });
+    if (best.wall !== null) add(best.wall, 'wall');
+    if (best.furn !== null && (best.wall === null || best.furn < best.wall - 0.01)) add(best.furn, 'furn');
+  }
+  return out;
 }
 
 // "Calamita": se un lato del mobile è vicino a un muro verticale/orizzontale, lo appoggia.
@@ -434,10 +437,12 @@ function renderCanvas() {
   if (cur) {
     if (ui.quotes) {
       for (const q of quotes(r, cur)) {
-        const m = { x: (q.a.x + q.b.x) / 2, y: (q.a.y + q.b.y) / 2 };
+        // le due quote sullo stesso lato (muro e mobile) hanno l'etichetta da parti opposte della linea
+        const sg = q.kind === 'furn' ? -1 : 1, off = 9 / k;
+        const m = { x: (q.a.x + q.b.x) / 2 - q.dir.y * off * sg, y: (q.a.y + q.b.y) / 2 + q.dir.x * off * sg };
         s += `<line class="q${q.kind === 'furn' ? ' qf' : ''}" x1="${q.a.x}" y1="${q.a.y}" x2="${q.b.x}" y2="${q.b.y}"/>`
           + `<circle class="qd${q.kind === 'furn' ? ' qf' : ''}" cx="${q.b.x}" cy="${q.b.y}" r="${2.5 / k}"/>`
-          + `<text class="wl ql" font-size="${11 / k}" x="${m.x}" y="${m.y}">${Math.round(q.d)}</text>`;
+          + `<text class="wl ql${q.kind === 'furn' ? ' qft' : ''}" font-size="${11 / k}" x="${m.x}" y="${m.y}">${Math.round(q.d)}</text>`;
       }
     }
     const rad = (cur.rot * Math.PI) / 180, near = cur.d / 2, far = cur.d / 2 + 24 / k;
