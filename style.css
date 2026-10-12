@@ -51,7 +51,7 @@ main { flex: 1; min-height: 0; display: flex; }
 #plan { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; cursor: grab; }
 #plan:active { cursor: grabbing; }
 #hint {
-  position: absolute; left: 12px; bottom: 8px; right: 12px;
+  position: absolute; left: 150px; bottom: 8px; right: 12px;
   font-size: 12px; color: var(--muted); pointer-events: none;
   text-align: right;
 }
@@ -120,6 +120,15 @@ tr.on td { background: color-mix(in srgb, var(--accent) 12%, transparent); }
 .fr.sel { stroke: var(--accent); stroke-width: 3; }
 .fr.bad { stroke: var(--danger); stroke-dasharray: 5 3; stroke-width: 2; }
 .ft { fill: #1a1a1a; text-anchor: middle; pointer-events: none; user-select: none; }
+.q { stroke: var(--accent); stroke-width: 1.3; vector-effect: non-scaling-stroke; pointer-events: none; }
+.q.qf { stroke: #e07b00; stroke-dasharray: 4 3; }
+.qd { fill: var(--accent); pointer-events: none; }
+.qd.qf { fill: #e07b00; }
+.ql { fill: var(--accent); font-weight: 600; }
+.rline { stroke: var(--accent); stroke-width: 1.5; vector-effect: non-scaling-stroke; pointer-events: none; }
+.rot { fill: var(--panel); stroke: var(--accent); stroke-width: 2; vector-effect: non-scaling-stroke; cursor: grab; }
+.head { fill: #8a5a3c; stroke: rgba(0,0,0,.55); stroke-width: 1; vector-effect: non-scaling-stroke; pointer-events: none; }
+nav button.active { background: var(--accent); border-color: var(--accent); color: #fff; }
 .sb { stroke: var(--text); stroke-width: 2; }
 .sbt { fill: var(--text); font-size: 11px; }
 

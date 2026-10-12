@@ -17,6 +17,7 @@ const PRESETS = [
   ['Scrivania', 140, 70], ['Libreria', 80, 30], ['Frigorifero', 60, 65], ['Lavatrice', 60, 60],
 ];
 const COLORS = ['#8fb8de', '#e6b17e', '#a8d5a2', '#d9a7c7', '#f2d57e', '#b5a9e0', '#9ad1cf'];
+const PERSON = { w: 63, d: 30 }; // omino visto dall'alto: larghezza spalle, profondità
 const FEAT_NAME = { niche: 'Nicchia', pillar: 'Pilastro' };
 const OPEN_NAME = { door: 'Porta', window: 'Finestra' };
 
@@ -63,7 +64,7 @@ function save() {
 }
 
 let state = null; // caricato in fondo al file, quando tutte le funzioni sono definite
-const ui = { view: { x: 0, y: 0, k: 0.5 }, sel: null, drag: null, open: { adv: false }, draft: {} };
+const ui = { view: { x: 0, y: 0, k: 0.5 }, sel: null, drag: null, open: { adv: false }, draft: {}, quotes: true };
 const history = [];
 
 const room = () => state.rooms.find((r) => r.id === state.current) || state.rooms[0];
@@ -189,12 +190,46 @@ function overlap(a, b) {
 function furnStatus(r) {
   const ring = outline(r), m = {};
   for (const f of r.furniture) m[f.id] = { out: outside(f, ring), ov: false };
-  for (let i = 0; i < r.furniture.length; i++) {
-    for (let j = i + 1; j < r.furniture.length; j++) {
-      if (overlap(r.furniture[i], r.furniture[j])) { m[r.furniture[i].id].ov = true; m[r.furniture[j].id].ov = true; }
+  const solid = r.furniture.filter((f) => !f.person); // l'omino può stare ovunque: niente avviso di sovrapposizione
+  for (let i = 0; i < solid.length; i++) {
+    for (let j = i + 1; j < solid.length; j++) {
+      if (overlap(solid[i], solid[j])) { m[solid[i].id].ov = true; m[solid[j].id].ov = true; }
     }
   }
   return m;
+}
+
+// Distanza dalla mezzeria di ciascun lato del mobile al primo ostacolo davanti a quel lato
+// (muro del contorno reale oppure un altro mobile), misurata perpendicolarmente al lato.
+function rayHit(o, d, a, b) {
+  const ex = b.x - a.x, ey = b.y - a.y, den = d.x * ey - d.y * ex;
+  if (Math.abs(den) < 1e-9) return null;
+  const wx = a.x - o.x, wy = a.y - o.y;
+  const t = (wx * ey - wy * ex) / den, u = (wx * d.y - wy * d.x) / den;
+  return t >= -1e-6 && u >= -1e-6 && u <= 1 + 1e-6 ? Math.max(0, t) : null;
+}
+
+function quotes(r, f) {
+  const ring = outline(r), c = Math.cos((f.rot * Math.PI) / 180), sn = Math.sin((f.rot * Math.PI) / 180), segs = [];
+  for (let i = 0; i < ring.length; i++) {
+    const a = ring[i], b = ring[(i + 1) % ring.length];
+    if (Math.hypot(b.x - a.x, b.y - a.y) > 0.01) segs.push([a, b, 'wall']);
+  }
+  for (const g of r.furniture) {
+    if (g === f) continue;
+    const q = corners(g);
+    for (let i = 0; i < 4; i++) segs.push([q[i], q[(i + 1) % 4], 'furn']);
+  }
+  return [[0, -1], [1, 0], [0, 1], [-1, 0]].map(([lx, ly]) => {
+    const dir = { x: lx * c - ly * sn, y: lx * sn + ly * c }, half = lx ? f.w / 2 : f.d / 2;
+    const o = { x: f.x + dir.x * half, y: f.y + dir.y * half };
+    let best = null;
+    for (const [a, b, kind] of segs) {
+      const h = rayHit(o, dir, a, b);
+      if (h !== null && (best === null || h < best.d)) best = { d: h, kind };
+    }
+    return best && { a: o, b: { x: o.x + dir.x * best.d, y: o.y + dir.y * best.d }, d: best.d, kind: best.kind };
+  }).filter(Boolean);
 }
 
 // "Calamita": se un lato del mobile è vicino a un muro verticale/orizzontale, lo appoggia.
@@ -376,12 +411,39 @@ function renderCanvas() {
 
   for (const f of r.furniture) {
     const bad = st[f.id].out || st[f.id].ov, on = isSel('furn', 'id', f.id);
+    const cls = `${on ? ' sel' : ''}${bad ? ' bad' : ''}`;
+    if (f.person) {
+      // vista dall'alto: spalle (ellisse), testa (cerchio) e naso che indica dove guarda (verso l'alto a rotazione 0)
+      const hr = Math.min(9, f.d * 0.3);
+      s += `<g transform="translate(${f.x} ${f.y}) rotate(${f.rot})">`
+        + `<ellipse class="fr${cls}" data-t="furn" data-id="${f.id}" cx="0" cy="0" rx="${f.w / 2}" ry="${f.d / 2}" fill="${esc(f.color)}"/>`
+        + `<circle class="head" cx="0" cy="0" r="${hr}"/>`
+        + `<path class="head" d="M${-hr * 0.35} ${-hr * 0.9} L0 ${-hr - 4} L${hr * 0.35} ${-hr * 0.9}"/></g>`;
+      continue;
+    }
     const fs = Math.max(Math.min(13 / k, f.d / 3, f.w / Math.max(6, f.name.length * 0.62)), 4), dims = f.d >= fs * 3;
     s += `<g transform="translate(${f.x} ${f.y}) rotate(${f.rot})">`
-      + `<rect class="fr${on ? ' sel' : ''}${bad ? ' bad' : ''}" data-t="furn" data-id="${f.id}" x="${-f.w / 2}" y="${-f.d / 2}" width="${f.w}" height="${f.d}" fill="${esc(f.color)}"/>`
+      + `<rect class="fr${cls}" data-t="furn" data-id="${f.id}" x="${-f.w / 2}" y="${-f.d / 2}" width="${f.w}" height="${f.d}" fill="${esc(f.color)}"/>`
       + `<text class="ft" font-size="${fs}" y="${dims ? -fs * 0.15 : fs * 0.35}">${esc(f.name)}</text>`
       + (dims ? `<text class="ft" font-size="${fs * 0.8}" y="${fs}">${r1(f.w)}×${r1(f.d)}</text>` : '')
       + `</g>`;
+  }
+
+  // quote e maniglia di rotazione del mobile selezionato
+  const cur = sel && sel.t === 'furn' ? r.furniture.find((x) => x.id === sel.id) : null;
+  if (cur) {
+    if (ui.quotes) {
+      for (const q of quotes(r, cur)) {
+        const m = { x: (q.a.x + q.b.x) / 2, y: (q.a.y + q.b.y) / 2 };
+        s += `<line class="q${q.kind === 'furn' ? ' qf' : ''}" x1="${q.a.x}" y1="${q.a.y}" x2="${q.b.x}" y2="${q.b.y}"/>`
+          + `<circle class="qd${q.kind === 'furn' ? ' qf' : ''}" cx="${q.b.x}" cy="${q.b.y}" r="${2.5 / k}"/>`
+          + `<text class="wl ql" font-size="${11 / k}" x="${m.x}" y="${m.y}">${Math.round(q.d)}</text>`;
+      }
+    }
+    const rad = (cur.rot * Math.PI) / 180, near = cur.d / 2, far = cur.d / 2 + 24 / k;
+    const hx = cur.x + Math.sin(rad) * far, hy = cur.y - Math.cos(rad) * far;
+    s += `<line class="rline" x1="${cur.x + Math.sin(rad) * near}" y1="${cur.y - Math.cos(rad) * near}" x2="${hx}" y2="${hy}"/>`
+      + `<circle class="rot" data-t="rot" cx="${hx}" cy="${hy}" r="${7 / k}"/>`;
   }
 
   $('#world').setAttribute('transform', `translate(${x} ${y}) scale(${k})`);
@@ -477,7 +539,8 @@ function renderPanel() {
       <input id="nf-w" type="number" placeholder="largh." value="${d('nf-w', '')}"> <span>×</span>
       <input id="nf-d" type="number" placeholder="prof." value="${d('nf-d', '')}">
       <button data-act="addfurn">Aggiungi</button></div>
-    <p class="muted">⚠ = fuori dalla stanza o sovrapposto a un altro mobile. Le porte non sono ancora considerate.</p>
+    <div class="row"><button data-act="addperson">+ Omino (spalle ${PERSON.w} × ${PERSON.d} cm)</button></div>
+    <p class="muted">⚠ = fuori dalla stanza o sovrapposto a un altro mobile (l'omino non conta come ingombro). Le porte non sono ancora considerate. Le quote del mobile selezionato si accendono dal pulsante «Quote» in alto.</p>
     <div class="chips">${r.furniture.map((x) => `<button class="chip${f && f.id === x.id ? ' on' : ''}" data-act="selfurn" data-id="${x.id}">${st[x.id].out || st[x.id].ov ? '⚠ ' : ''}${esc(x.name)} <small>${r1(x.w)}×${r1(x.d)}</small></button>`).join('')}</div>
     ${f ? `<div class="card on"><div class="grid2">
         <label>Nome ${inp('fset', { id: f.id, p: 'name', val: f.name, type: 'text' })}</label>
@@ -589,6 +652,12 @@ panel.addEventListener('click', (e) => {
       r.furniture.push(nf); ui.sel = { t: 'furn', id: nf.id };
       ui.draft['nf-name'] = ''; ui.draft['nf-w'] = ''; ui.draft['nf-d'] = ''; break;
     }
+    case 'addperson': {
+      snap();
+      const b = bbox({ pts: r.pts, features: [], furniture: [] });
+      const np = { id: uid(), name: 'Omino', person: true, w: PERSON.w, d: PERSON.d, x: Math.round((b.x0 + b.x1) / 2), y: Math.round((b.y0 + b.y1) / 2), rot: 0, color: '#f2b896' };
+      r.furniture.push(np); ui.sel = { t: 'furn', id: np.id }; break;
+    }
     case 'selfurn': ui.sel = { t: 'furn', id }; break;
     case 'rotf': if (!f) return; snap(); f.rot = (((f.rot + num(el.dataset.d)) % 360) + 360) % 360; break;
     case 'dupf': {
@@ -662,6 +731,8 @@ svg.addEventListener('pointerdown', (e) => {
     const f = r.furniture.find((x) => x.id === t.dataset.id);
     ui.sel = { t: 'furn', id: f.id };
     ui.drag = { ...base, kind: 'furn', f, ox: p.x - f.x, oy: p.y - f.y };
+  } else if (t && t.dataset.t === 'rot' && ui.sel && ui.sel.t === 'furn') {
+    ui.drag = { ...base, kind: 'rot', f: r.furniture.find((x) => x.id === ui.sel.id) };
   } else if (t && t.dataset.t === 'feat') {
     ui.sel = { t: 'feat', id: t.dataset.id }; ui.drag = pan;
   } else if (t && t.dataset.t === 'open') {
@@ -680,12 +751,16 @@ svg.addEventListener('pointermove', (e) => {
   if (!d.moved) {
     if (Math.hypot(e.clientX - d.sx, e.clientY - d.sy) < 3) return;
     d.moved = true;
-    if (d.kind === 'furn') snap();
+    if (d.kind === 'furn' || d.kind === 'rot') snap();
   }
   if (d.kind === 'pan') {
     ui.view.x = d.vx + e.clientX - d.sx; ui.view.y = d.vy + e.clientY - d.sy;
+  } else if (d.kind === 'rot') {
+    const p = toWorld(e), deg = (Math.atan2(p.y - d.f.y, p.x - d.f.x) * 180) / Math.PI + 90;
+    const step = e.altKey || d.f.person ? 1 : 5; // l'omino si gira liberamente
+    d.f.rot = ((snapTo(deg, step) % 360) + 360) % 360;
   } else {
-    const p = toWorld(e), free = e.altKey;
+    const p = toWorld(e), free = e.altKey || d.f.person; // l'omino si muove liberamente: niente snap né calamita
     d.f.x = p.x - d.ox; d.f.y = p.y - d.oy;
     if (!free) { d.f.x = snapTo(d.f.x); d.f.y = snapTo(d.f.y); magnet(d.f, outline(room())); }
   }
@@ -695,7 +770,7 @@ svg.addEventListener('pointermove', (e) => {
 function endDrag() {
   const d = ui.drag;
   ui.drag = null;
-  if (d && d.moved && d.kind === 'furn') save();
+  if (d && d.moved && (d.kind === 'furn' || d.kind === 'rot')) save();
   renderPanel();
 }
 svg.addEventListener('pointerup', endDrag);
@@ -734,6 +809,12 @@ document.addEventListener('keydown', (e) => {
 /* ---------- barra superiore ---------- */
 
 $('#b-undo').addEventListener('click', undo);
+$('#b-quotes').addEventListener('click', (e) => {
+  ui.quotes = !ui.quotes;
+  e.currentTarget.classList.toggle('active', ui.quotes);
+  e.currentTarget.setAttribute('aria-pressed', ui.quotes);
+  renderCanvas();
+});
 $('#b-fit').addEventListener('click', () => { fit(); renderCanvas(); });
 $('#b-export').addEventListener('click', () => {
   const a = document.createElement('a');
